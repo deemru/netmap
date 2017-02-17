@@ -325,6 +325,12 @@ nm_txrx_swap(enum txrx t)
 
 #define for_rx_tx(t)	for ((t) = 0; (t) < NR_TXRX; (t)++)
 
+#ifdef WITH_MONITOR
+struct netmap_zmon_list {
+	struct netmap_kring *next;
+	struct netmap_kring *prev;
+};
+#endif /* WITH_MONITOR */
 
 /*
  * private, kernel view of a ring. Keeps track of the status of
@@ -499,6 +505,12 @@ struct netmap_kring {
 	struct netmap_kring **monitors;
 	uint32_t max_monitors; /* current size of the monitors array */
 	uint32_t n_monitors;	/* next unused entry in the monitor array */
+	uint32_t mon_pos[NR_TXRX]; /* index of this ring in the monitored ring array */
+	uint32_t mon_tail;  /* last seen slot on rx */
+
+	/* circular list of zero-copy monitors */
+	struct netmap_zmon_list zmon_list[NR_TXRX];
+
 	/*
 	 * Monitors work by intercepting the sync and notify callbacks of the
 	 * monitored krings. This is implemented by replacing the pointers
@@ -507,8 +519,6 @@ struct netmap_kring {
 	int (*mon_sync)(struct netmap_kring *kring, int flags);
 	int (*mon_notify)(struct netmap_kring *kring, int flags);
 
-	uint32_t mon_tail;  /* last seen slot on rx */
-	uint32_t mon_pos[NR_TXRX];  /* index of this ring in the monitored ring array */
 #endif
 }
 #ifdef _WIN32
@@ -739,8 +749,9 @@ struct netmap_adapter {
 	int (*nm_txsync)(struct netmap_kring *kring, int flags);
 	int (*nm_rxsync)(struct netmap_kring *kring, int flags);
 	int (*nm_notify)(struct netmap_kring *kring, int flags);
-#define NAF_FORCE_READ    1
-#define NAF_FORCE_RECLAIM 2
+#define NAF_FORCE_READ      1
+#define NAF_FORCE_RECLAIM   2
+#define NAF_CAN_FORWARD_DOWN 4
 	/* return configuration information */
 	int (*nm_config)(struct netmap_adapter *,
 		u_int *txr, u_int *txd, u_int *rxr, u_int *rxd);
@@ -862,6 +873,7 @@ struct netmap_vp_adapter {	/* VALE software port */
 	int bdg_port;
 	struct nm_bridge *na_bdg;
 	int retry;
+	int autodelete; /* remove the ifp on last reference */
 
 	/* Maximum Frame Size, used in bdg_mismatch_datapath() */
 	u_int mfs;
@@ -985,7 +997,10 @@ struct netmap_bwrap_adapter {
 	struct nm_bdg_polling_state *na_polling_state;
 };
 int netmap_bwrap_attach(const char *name, struct netmap_adapter *);
+int netmap_vi_create(struct nmreq *, int);
 
+#else /* !WITH_VALE */
+#define netmap_vi_create(nmr, a) (EOPNOTSUPP)
 #endif /* WITH_VALE */
 
 #ifdef WITH_PIPES
@@ -1001,6 +1016,7 @@ struct netmap_pipe_adapter {
 	struct netmap_adapter *parent; /* adapter that owns the memory */
 	struct netmap_pipe_adapter *peer; /* the other end of the pipe */
 	int peer_ref;		/* 1 iff we are holding a ref to the peer */
+	struct ifnet *parent_ifp;	/* maybe null */
 
 	u_int parent_slot; /* index in the parent pipe array */
 };
@@ -1388,9 +1404,10 @@ void netmap_do_unregif(struct netmap_priv_d *priv);
 
 u_int nm_bound_var(u_int *v, u_int dflt, u_int lo, u_int hi, const char *msg);
 int netmap_get_na(struct nmreq *nmr, struct netmap_adapter **na,
-		  struct ifnet **ifp, int create);
+		  struct ifnet **ifp, struct netmap_mem_d *nmd, int create);
 void netmap_unget_na(struct netmap_adapter *na, struct ifnet *ifp);
-int netmap_get_hw_na(struct ifnet *ifp, struct netmap_adapter **na);
+int netmap_get_hw_na(struct ifnet *ifp,
+		struct netmap_mem_d *nmd, struct netmap_adapter **na);
 
 
 #ifdef WITH_VALE
@@ -1422,7 +1439,8 @@ u_int netmap_bdg_learning(struct nm_bdg_fwd *ft, uint8_t *dst_ring,
 #define	NM_BDG_NOPORT		(NM_BDG_MAXPORTS+1)
 
 /* these are redefined in case of no VALE support */
-int netmap_get_bdg_na(struct nmreq *nmr, struct netmap_adapter **na, int create);
+int netmap_get_bdg_na(struct nmreq *nmr, struct netmap_adapter **na,
+		struct netmap_mem_d *nmd, int create);
 struct nm_bridge *netmap_init_bridges2(u_int);
 void netmap_uninit_bridges2(struct nm_bridge *, u_int);
 int netmap_init_bridges(void);
@@ -1431,7 +1449,7 @@ int netmap_bdg_ctl(struct nmreq *nmr, struct netmap_bdg_ops *bdg_ops);
 int netmap_bdg_config(struct nmreq *nmr);
 
 #else /* !WITH_VALE */
-#define	netmap_get_bdg_na(_1, _2, _3)	0
+#define	netmap_get_bdg_na(_1, _2, _3, _4)	0
 #define netmap_init_bridges(_1) 0
 #define netmap_uninit_bridges()
 #define	netmap_bdg_ctl(_1, _2)	EINVAL
@@ -1441,22 +1459,24 @@ int netmap_bdg_config(struct nmreq *nmr);
 /* max number of pipes per device */
 #define NM_MAXPIPES	64	/* XXX how many? */
 void netmap_pipe_dealloc(struct netmap_adapter *);
-int netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create);
+int netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na,
+		struct netmap_mem_d *nmd, int create);
 #else /* !WITH_PIPES */
 #define NM_MAXPIPES	0
 #define netmap_pipe_alloc(_1, _2) 	0
 #define netmap_pipe_dealloc(_1)
-#define netmap_get_pipe_na(nmr, _2, _3)	\
+#define netmap_get_pipe_na(nmr, _2, _3, _4)	\
 	({ int role__ = (nmr)->nr_flags & NR_REG_MASK; \
 	   (role__ == NR_REG_PIPE_MASTER || 	       \
 	    role__ == NR_REG_PIPE_SLAVE) ? EOPNOTSUPP : 0; })
 #endif
 
 #ifdef WITH_MONITOR
-int netmap_get_monitor_na(struct nmreq *nmr, struct netmap_adapter **na, int create);
+int netmap_get_monitor_na(struct nmreq *nmr, struct netmap_adapter **na,
+		struct netmap_mem_d *nmd, int create);
 void netmap_monitor_stop(struct netmap_adapter *na);
 #else
-#define netmap_get_monitor_na(nmr, _2, _3) \
+#define netmap_get_monitor_na(nmr, _2, _3, _4) \
 	((nmr)->nr_flags & (NR_MONITOR_TX | NR_MONITOR_RX) ? EOPNOTSUPP : 0)
 #endif
 
@@ -1789,6 +1809,7 @@ struct netmap_priv_d {
 	u_int		np_qfirst[NR_TXRX],
 			np_qlast[NR_TXRX]; /* range of tx/rx rings to scan */
 	uint16_t	np_txpoll;	/* XXX and also np_rxpoll ? */
+	int             np_sync_flags; /* to be passed to nm_sync */
 
 	int		np_refs;	/* use with NMG_LOCK held */
 
@@ -1819,6 +1840,11 @@ static inline int nm_kring_pending(struct netmap_priv_d *np)
 	}
 	return 0;
 }
+
+#ifdef WITH_PIPES
+int netmap_pipe_txsync(struct netmap_kring *txkring, int flags);
+int netmap_pipe_rxsync(struct netmap_kring *rxkring, int flags);
+#endif /* WITH_PIPES */
 
 #ifdef WITH_MONITOR
 
@@ -2045,7 +2071,8 @@ struct netmap_pt_host_adapter {
 	void *ptns;
 };
 /* ptnetmap HOST routines */
-int netmap_get_pt_host_na(struct nmreq *nmr, struct netmap_adapter **na, int create);
+int netmap_get_pt_host_na(struct nmreq *nmr, struct netmap_adapter **na,
+		struct netmap_mem_d * nmd, int create);
 int ptnetmap_ctl(struct nmreq *nmr, struct netmap_adapter *na);
 static inline int
 nm_ptnetmap_host_on(struct netmap_adapter *na)
@@ -2053,7 +2080,7 @@ nm_ptnetmap_host_on(struct netmap_adapter *na)
 	return na && na->na_flags & NAF_PTNETMAP_HOST;
 }
 #else /* !WITH_PTNETMAP_HOST */
-#define netmap_get_pt_host_na(nmr, _2, _3) \
+#define netmap_get_pt_host_na(nmr, _2, _3, _4) \
 	((nmr)->nr_flags & (NR_PTNETMAP_HOST) ? EOPNOTSUPP : 0)
 #define ptnetmap_ctl(_1, _2)   EINVAL
 #define nm_ptnetmap_host_on(_1)   EINVAL

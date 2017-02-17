@@ -29,8 +29,8 @@
  * character device drivers and network code/device drivers.
  */
 
-#ifndef _BSD_GLUE_H
-#define _BSD_GLUE_H
+#ifndef NETMAP_BSD_GLUE_H
+#define NETMAP_BSD_GLUE_H
 
 /* a set of headers used in netmap */
 #include <linux/version.h>
@@ -120,14 +120,14 @@ struct net_device_ops {
 #define netdev_tx_t	int
 #endif
 
-#ifndef NETMAP_LINUX_HAVE_USLEEP_RANGE
+#if !defined(NETMAP_LINUX_HAVE_USLEEP_RANGE) && !defined(usleep_range)
 #define usleep_range(a, b)	msleep((a)+(b)+999)
 #endif
 
 #ifdef NETMAP_LINUX_HAVE_PAGE_REF
 #define NM_SET_PAGE_COUNT(page, v)	set_page_count(page, v)
 #else
-#define NM_SET_PAGE_COUNT(page, v)	atomic_inc(&((page)->NETMAP_LINUX_PAGE_COUNT), (v))
+#define NM_SET_PAGE_COUNT(page, v)	atomic_set(&((page)->NETMAP_LINUX_PAGE_COUNT), (v))
 #endif
 
 #ifndef NETMAP_LINUX_HAVE_SPLIT_PAGE
@@ -139,21 +139,21 @@ struct net_device_ops {
 	} while (0)
 #endif /* HAVE_SPLIT_PAGE */
 
-#ifndef NETMAP_LINUX_HAVE_NNITD
+#if !defined(NETMAP_LINUX_HAVE_NNITD) && !defined(netdev_notifier_info_to_dev)
 #define netdev_notifier_info_to_dev(ptr)	(ptr)
 #endif /* HAVE_NNITD */
 
-#ifndef NETMAP_LINUX_HAVE_SKB_FRAG_SIZE
+#if !defined(NETMAP_LINUX_HAVE_SKB_FRAG_SIZE) && !defined(skb_frag_size)
 static inline unsigned int skb_frag_size(const skb_frag_t *frag) {
 	return frag->size;
 }
 #endif
-#ifndef NETMAP_LINUX_HAVE_SKB_FRAG_ADDRESS
+#if !defined(NETMAP_LINUX_HAVE_SKB_FRAG_ADDRESS) && !defined(skb_frag_address)
 static inline void *skb_frag_address(const skb_frag_t *frag) {
 	return page_address(frag->page) + frag->page_offset;
 }
 #endif
-#ifndef NETMAP_LINUX_HAVE_SKB_CHECKSUM_START_OFFSET
+#if !defined(NETMAP_LINUX_HAVE_SKB_CHECKSUM_START_OFFSET) && !defined(skb_checksum_start_offset)
 static inline int skb_checksum_start_offset(const struct sk_buff *skb) {
 	return skb->csum_start - skb_headroom(skb);
 }
@@ -164,6 +164,14 @@ static inline int skb_checksum_start_offset(const struct sk_buff *skb) {
 #else
 #define	DEV_NUM_RX_QUEUES(_netdev) 1
 #endif
+
+#ifdef NETMAP_LINUX_HAVE_REG_NOTIF_RH
+#define NM_REG_NETDEV_NOTIF(nb)		register_netdevice_notifier_rh(nb)
+#define NM_UNREG_NETDEV_NOTIF(nb)	unregister_netdevice_notifier_rh(nb)
+#else
+#define NM_REG_NETDEV_NOTIF(nb)		register_netdevice_notifier(nb)
+#define NM_UNREG_NETDEV_NOTIF(nb)	unregister_netdevice_notifier(nb)
+#endif /* NETMAP_LINUX_HAVE_REG_NOTIF_RH */
 
 /*----------- end of LINUX_VERSION_CODE dependencies ----------*/
 
@@ -275,6 +283,7 @@ struct thread;
 
 /* some other FreeBSD APIs */
 struct net_device* ifunit_ref(const char *name);
+void if_ref(struct net_device *ifp);
 void if_rele(struct net_device *ifp);
 
 /* hook to send from user space */
@@ -483,4 +492,4 @@ void netmap_bns_unregister(void);
 
 #define if_printf(ifp, fmt, ...)  dev_info(&(ifp)->dev, fmt, ##__VA_ARGS__)
 
-#endif /* _BSD_GLUE_H */
+#endif /* NETMAP_BSD_GLUE_H */

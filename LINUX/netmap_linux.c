@@ -128,7 +128,7 @@ static int nm_os_ifnet_registered;
 int
 nm_os_ifnet_init(void)
 {
-	int error = register_netdevice_notifier(&linux_netmap_netdev_notifier);
+	int error = NM_REG_NETDEV_NOTIF(&linux_netmap_netdev_notifier);
 	if (!error)
 		nm_os_ifnet_registered = 1;
 	return error;
@@ -138,7 +138,7 @@ void
 nm_os_ifnet_fini(void)
 {
 	if (nm_os_ifnet_registered) {
-		unregister_netdevice_notifier(&linux_netmap_netdev_notifier);
+		NM_UNREG_NETDEV_NOTIF(&linux_netmap_netdev_notifier);
 		nm_os_ifnet_registered = 0;
 	}
 }
@@ -539,13 +539,6 @@ generic_qdisc_dequeue(struct Qdisc *qdisc)
 	return m;
 }
 
-static struct mbuf *
-generic_qdisc_peek(struct Qdisc *qdisc)
-{
-	RD(5, "Peeking queue, curr len %u", qdisc_qlen(qdisc));
-	return skb_peek(&qdisc->q);
-}
-
 static struct Qdisc_ops
 generic_qdisc_ops __read_mostly = {
 	.id		= "netmap_generic",
@@ -555,7 +548,6 @@ generic_qdisc_ops __read_mostly = {
 	.change		= generic_qdisc_init,
 	.enqueue	= generic_qdisc_enqueue,
 	.dequeue	= generic_qdisc_dequeue,
-	.peek		= generic_qdisc_peek,
 	.dump		= NULL,
 	.owner		= THIS_MODULE,
 };
@@ -886,6 +878,11 @@ ifunit_ref(const char *name)
 #endif
 }
 
+void if_ref(struct net_device *ifp)
+{
+	dev_hold(ifp);
+}
+
 void if_rele(struct net_device *ifp)
 {
 	dev_put(ifp);
@@ -1071,6 +1068,16 @@ linux_netmap_ioctl(struct file *file, u_int cmd, u_long data /* arg */)
 	return -ret;
 }
 
+#ifdef CONFIG_COMPAT
+#include <asm/compat.h>
+
+static long
+linux_netmap_compat_ioctl(struct file *file, unsigned int cmd,
+                          unsigned long arg)
+{
+    return linux_netmap_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
+}
+#endif
 
 static int
 linux_netmap_release(struct inode *inode, struct file *file)
@@ -1108,6 +1115,9 @@ static struct file_operations netmap_fops = {
     .open = linux_netmap_open,
     .mmap = linux_netmap_mmap,
     LIN_IOCTL_NAME = linux_netmap_ioctl,
+#ifdef CONFIG_COMPAT
+    .compat_ioctl = linux_netmap_compat_ioctl,
+#endif
     .poll = linux_netmap_poll,
     .release = linux_netmap_release,
 };
@@ -2124,6 +2134,7 @@ int
 nm_os_vi_persist(const char *name, struct ifnet **ret)
 {
 	struct ifnet *ifp;
+	int error;
 
 	if (!try_module_get(linux_dummy_drv.owner))
 		return EFAULT;
@@ -2133,16 +2144,27 @@ nm_os_vi_persist(const char *name, struct ifnet **ret)
 	ifp = alloc_netdev(0, name, linux_nm_vi_setup);
 #endif
 	if (!ifp) {
-		module_put(linux_dummy_drv.owner);
-		return ENOMEM;
+		error = ENOMEM;
+		goto err_put;
 	}
 	dev_net_set(ifp, &init_net);
 	ifp->features |= NETIF_F_NETNS_LOCAL; /* just for safety */
-	register_netdev(ifp);
 	ifp->dev.driver = &linux_dummy_drv;
+	error = register_netdev(ifp);
+	if (error < 0) {
+		D("error %d", error);
+		error = -error;
+		goto err_free;
+	}
 	netif_start_queue(ifp);
 	*ret = ifp;
 	return 0;
+
+err_free:
+	free_netdev(ifp);
+err_put:
+	module_put(linux_dummy_drv.owner);
+	return error;
 }
 
 void
@@ -2191,7 +2213,14 @@ EXPORT_SYMBOL(netmap_bdg_name);		/* the bridge the vp is attached to */
 EXPORT_SYMBOL(netmap_disable_all_rings);
 EXPORT_SYMBOL(netmap_enable_all_rings);
 EXPORT_SYMBOL(netmap_krings_create);
-
+EXPORT_SYMBOL(netmap_krings_delete);	/* used by veth module */
+EXPORT_SYMBOL(netmap_mem_rings_create);	/* used by veth module */
+EXPORT_SYMBOL(netmap_mem_rings_delete);	/* used by veth module */
+#ifdef WITH_PIPES
+EXPORT_SYMBOL(netmap_pipe_txsync);	/* used by veth module */
+EXPORT_SYMBOL(netmap_pipe_rxsync);	/* used by veth module */
+#endif /* WITH_PIPES */
+EXPORT_SYMBOL(netmap_verbose);
 
 MODULE_AUTHOR("http://info.iet.unipi.it/~luigi/netmap/");
 MODULE_DESCRIPTION("The netmap packet I/O framework");

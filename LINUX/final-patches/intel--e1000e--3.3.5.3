@@ -31,7 +31,7 @@ index 35ccb2d..6f4e05e 100644
  	# remove all old versions of the driver
  	find $(INSTALL_MOD_PATH)/lib/modules/$(KVER) -name $(TARGET) -exec rm -f {} \; || true
 diff --git a/e1000e/netdev.c b/e1000e/netdev.c
-index 702d367..e31161d 100644
+index 73b0f9a..561bb5c 100644
 --- a/e1000e/netdev.c
 +++ b/e1000e/netdev.c
 @@ -504,6 +504,10 @@ static int e1000_desc_unused(struct e1000_ring *ring)
@@ -75,7 +75,7 @@ index 702d367..e31161d 100644
  	i = tx_ring->next_to_clean;
  	eop = tx_ring->buffer_info[i].next_to_watch;
  	eop_desc = E1000_TX_DESC(*tx_ring, eop);
-@@ -4247,6 +4267,10 @@ static void e1000_configure(struct e1000_adapter *adapter)
+@@ -4236,6 +4256,10 @@ static void e1000_configure(struct e1000_adapter *adapter)
  #endif
  	e1000_setup_rctl(adapter);
  	e1000_configure_rx(adapter);
@@ -86,7 +86,7 @@ index 702d367..e31161d 100644
  	adapter->alloc_rx_buf(rx_ring, e1000_desc_unused(rx_ring), GFP_KERNEL);
  }
  
-@@ -8338,6 +8362,10 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+@@ -8414,6 +8438,10 @@ static int e1000_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
  	if (err)
  		goto err_register;
  
@@ -97,7 +97,7 @@ index 702d367..e31161d 100644
  	/* carrier off reporting is important to ethtool even BEFORE open */
  	netif_carrier_off(netdev);
  
-@@ -8442,6 +8470,10 @@ static void e1000_remove(struct pci_dev *pdev)
+@@ -8515,6 +8543,10 @@ static void e1000_remove(struct pci_dev *pdev)
  	kfree(adapter->tx_ring);
  	kfree(adapter->rx_ring);
  

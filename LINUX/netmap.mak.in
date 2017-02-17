@@ -59,7 +59,7 @@ endef
 define external_driver
 build-$(1): get-$(1) netmap.ko
 	if [ -d $(1) ] && [ -e Module.symvers ]; then cp Module.symvers $(1); fi
-	$($(1)@build)
+	+$($(1)@build)
 clean-$(1):
 	-$($(1)@clean)
 install-$(1): install-netmap
@@ -74,14 +74,15 @@ all: $(S_DRIVERS:%=get-%) netmap.ko $(E_DRIVERS:%=build-%) apps
 netmap.ko:
 	$(MAKE) $(COMMON_OPTS) CONFIG_NETMAP=m $(MOD_LIST) O_DRIVERS="$(patsubst %.c,%.o,$(filter-out $(DRIVERS_EXT),$(DRIVERS)))" NETMAP_DRIVER_SUFFIX=$(DRVSUFFIX)
 
+-include default-config.mak
 -include config.mak
-include drivers.mak
+-include drivers.mak
 
 $(foreach d,$(S_DRIVERS),$(eval $(call common_driver,$(d))))
 $(foreach d,$(E_DRIVERS),$(eval $(call external_driver,$(d))))
 
-.PHONY: install install-netmap install-apps install-headers
-install: install-netmap $(E_DRIVERS:%=install-%) install-apps install-headers
+.PHONY: install install-netmap install-apps install-headers install-docs
+install: install-netmap $(E_DRIVERS:%=install-%) install-apps install-headers install-docs
 
 install-netmap:
 	$(MAKE) -C $(KSRC) M=$(BUILDDIR) CONFIG_NETMAP=m $(MOD_LIST) \
@@ -110,7 +111,7 @@ clean-apps: $(APPS_LIST:%=clean-app-%)
 .PHONY: apps $(APPS_BUILD) install-apps $(APPS_INSTALL)
 define apps_actions
 build-app-$(1):
-	$(MAKE) -C build-apps/$(1) SRCDIR=$(SRCDIR)/.. CC="$(APPS_CC)" LD="$(APPS_LD)"
+	+$(MAKE) -C build-apps/$(1) SRCDIR=$(SRCDIR)/.. CC="$(APPS_CC)" LD="$(APPS_LD)"
 
 install-app-$(1):
 	$(MAKE) -C build-apps/$(1) install SRCDIR=$(SRCDIR)/.. DESTDIR="$(abspath $(DESTDIR))" PREFIX="$(PREFIX)"
@@ -128,6 +129,12 @@ INCLUDE_PREFIX := $(if $(filter-out /,$(PREFIX)),$(PREFIX),/usr)
 install-headers:
 	install -m 0644 -D $(SRCDIR)/../sys/net/netmap.h $(DESTDIR)/$(INCLUDE_PREFIX)/include/net/netmap.h
 	install -m 0644 -D $(SRCDIR)/../sys/net/netmap_user.h $(DESTDIR)/$(INCLUDE_PREFIX)/include/net/netmap_user.h
+	install -m 0644 -D $(SRCDIR)/../sys/net/netmap_virt.h $(DESTDIR)/$(INCLUDE_PREFIX)/include/net/netmap_virt.h
+
+MAN_PREFIX := $(INCLUDE_PREFIX)
+
+install-docs:
+	install -D -m 644 $(SRCDIR)/../share/man/man4/netmap.4 $(DESTDIR)/$(MAN_PREFIX)/share/man/man4/netmap.4
 
 distclean: clean $(S_DRIVERS:%=distclean-%)
 	rm -f config.status config.log netmap_linux_config.h \

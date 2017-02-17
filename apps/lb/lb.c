@@ -83,6 +83,7 @@ struct compact_ipv6_hdr {
 #define DEF_OUT_PIPES 	2
 #define DEF_EXTRA_BUFS 	0
 #define DEF_BATCH	2048
+#define DEF_WAIT_LINK	2
 #define DEF_SYSLOG_INT	600
 #define BUF_REVOKE	100
 
@@ -95,6 +96,7 @@ struct {
 	uint32_t extra_bufs;
 	uint16_t batch;
 	int syslog_interval;
+	int wait_link;
 } glob_arg;
 
 /*
@@ -305,6 +307,7 @@ void usage()
 	printf("  -p [prefix:]npipes	add a new group of output pipes\n");
 	printf("  -B nbufs        	number of extra buffers (default: %d)\n", DEF_EXTRA_BUFS);
 	printf("  -b batch        	batch size (default: %d)\n", DEF_BATCH);
+	printf("  -w seconds        	wait for link up (default: %d)\n", DEF_WAIT_LINK);
 	printf("  -s seconds      	seconds between syslog messages (default: %d)\n",
 			DEF_SYSLOG_INT);
 	exit(0);
@@ -362,91 +365,6 @@ parse_pipes(char *spec)
 	glob_arg.output_rings += g->nports;
 	glob_arg.num_groups++;
 	return 0;
-}
-
-static void delete_custom_ports(void);
-/* create a persistent vale port or reuse an existing one.
- * Returns 1 on error, 0 on success
- */
-static int
-create_custom_ports(int memid)
-{
-	struct nmreq nmr;
-	int i,rv;
-	struct group_des *g;
-
-	rv = open("/dev/netmap", O_RDWR);
-	if (rv < 0) {
-		D("failed to open /dev/netmap: %s", strerror(errno));
-		return 1;
-	}
-	glob_arg.netmap_fd = rv;
-
-	for (i = 0; i < glob_arg.num_groups; i++) {
-		g = &groups[i];
-
-		if (!g->custom_port)
-			continue;
-
-		bzero(&nmr, sizeof(nmr));
-		nmr.nr_version = NETMAP_API;
-		strncpy(nmr.nr_name, g->pipename, sizeof(nmr.nr_name));
-		nmr.nr_cmd = NETMAP_BDG_NEWIF;
-		nmr.nr_arg2 = memid;
-		
-		rv = ioctl(glob_arg.netmap_fd, NIOCREGIF, &nmr);
-		if (rv < 0) {
-			/* reset the custom_port flag, so that we do not
-			 * try to delete what we did not create
-			 */
-			g->custom_port = 0;
-			if (errno == EEXIST) {
-				if (nmr.nr_arg2 != memid) {
-					D("%s already exists, but it is using allocator %d instead of %d",
-							g->pipename, nmr.nr_arg2, memid);
-							
-					return 1;
-				} else {
-					D("opened already existing port %s", g->pipename);
-				}
-			} else {
-				D("error creating %s: %s", g->pipename, strerror(errno));
-				return 1;
-			}
-		} else {
-			D("successfully created port %s", g->pipename);
-		}
-	}
-	return 0;
-}
-
-/* called at exit to remove all the custom ports that
- * we created (note that deletion may fail is somebody
- * is still using either the ports or their pipes
- */
-static void
-delete_custom_ports(void)
-{
-	struct nmreq nmr;
-	int rv, i;
-
-	for (i = 0; i < glob_arg.num_groups; i++) {
-		struct group_des *g = &groups[i];
-
-		if (!g->custom_port)
-			continue;
-
-		bzero(&nmr, sizeof(nmr));
-		nmr.nr_version = NETMAP_API;
-		strncpy(nmr.nr_name, g->pipename, sizeof(nmr.nr_name));
-		nmr.nr_cmd = NETMAP_BDG_DELIF;
-		
-		rv = ioctl(glob_arg.netmap_fd, NIOCREGIF, &nmr);
-		if (rv < 0) {
-			D("WARNING: error while deleting %s: %s",
-					g->pipename, strerror(errno));
-		}
-	}
 }
 
 /* complete the initialization of the groups data structure */
@@ -576,6 +494,7 @@ int main(int argc, char **argv)
 	glob_arg.ifname[0] = '\0';
 	glob_arg.output_rings = 0;
 	glob_arg.batch = DEF_BATCH;
+	glob_arg.wait_link = DEF_WAIT_LINK;
 	glob_arg.syslog_interval = DEF_SYSLOG_INT;
 
 	while ( (ch = getopt(argc, argv, "i:p:b:B:s:")) != -1) {
@@ -720,6 +639,8 @@ int main(int argc, char **argv)
 	     scan = *(uint32_t *)NETMAP_BUF(rxport->ring, scan))
 	{
 		struct netmap_slot s;
+		s.len = s.flags = 0;
+		s.ptr = 0;
 		s.buf_idx = scan;
 		ND("freeq <- %d", s.buf_idx);
 		oq_enq(freeq, &s);
@@ -734,13 +655,6 @@ int main(int argc, char **argv)
 	rxport->nmd->nifp->ni_bufs_head = 0;
 
 run:
-	/* we need to create the persistent vale ports */
-	if (create_custom_ports(rxport->nmd->req.nr_arg2)) {
-		free_buffers();
-		return 1;
-	}
-	atexit(delete_custom_ports);
-
 	atexit(free_buffers);
 
 	int j, t = 0;
@@ -750,7 +664,8 @@ run:
 		for (k = 0; k < g->nports; ++k) {
 			struct port_des *p = &g->ports[k];
 			char interface[25];
-			sprintf(interface, "netmap:%s{%d/xT", g->pipename, g->first_id + k);
+			sprintf(interface, "netmap:%s{%d/xT@%d", g->pipename, g->first_id + k,
+					rxport->nmd->req.nr_arg2);
 			D("opening pipe named %s", interface);
 
 			p->nmd = nm_open(interface, NULL, 0, rxport->nmd);
@@ -794,7 +709,7 @@ run:
 		D("*** overflow queues disabled ***");
 	}
 
-	sleep(2);
+	sleep(glob_arg.wait_link);
 
 	struct pollfd pollfd[npipes + 1];
 	memset(&pollfd, 0, sizeof(pollfd));

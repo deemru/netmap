@@ -396,6 +396,7 @@ setaffinity(int i)
 {
         cpuset_t cpumask;
 	struct sched_param p;
+	int error;
 
         if (i == -1)
                 return 0;
@@ -404,8 +405,8 @@ setaffinity(int i)
         CPU_ZERO(&cpumask);
         CPU_SET(i, &cpumask);
 
-        if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset_t), &cpumask) != 0) {
-                ED("Unable to set affinity: %s", strerror(errno));
+        if ( (error = pthread_setaffinity_np(pthread_self(), sizeof(cpuset_t), &cpumask)) != 0) {
+                ED("Unable to set affinity to cpu %d: %s", i, strerror(error));
         }
 	if (setpriority(PRIO_PROCESS, 0, -10)) {; // XXX not meaningful
                 ED("Unable to set priority: %s", strerror(errno));
@@ -829,14 +830,17 @@ cons(void *_pa)
 	ND(5, "drain len %ld now %ld tx %ld h %ld t %ld next %ld",
 		p->pktlen, q->cons_now, p->pt_tx, q->head, q->tail, p->next);
 	/* XXX inefficient but simple */
-	pending++;
-	if (nm_inject(pa->pb, (char *)(p + 1), p->pktlen) == 0 ||
-		pending > q->burst) {
+	if (nm_inject(pa->pb, (char *)(p + 1), p->pktlen) == 0) {
 	    ND(5, "inject failed len %d now %ld tx %ld h %ld t %ld next %ld",
 		(int)p->pktlen, q->cons_now, p->pt_tx, q->head, q->tail, p->next);
 	    ioctl(pa->pb->fd, NIOCTXSYNC, 0);
 	    pending = 0;
 	    continue;
+	}
+	pending++;
+	if (pending > q->burst) {
+	    ioctl(pa->pb->fd, NIOCTXSYNC, 0);
+	    pending = 0;
 	}
 
 	q->head = p->next;
@@ -1619,16 +1623,16 @@ exp_delay_run(struct _qs *q, struct _cfg *arg)
 }
 
 
-#define _CFG_END	NULL, 0, {0}
+#define TLEM_CFG_END	NULL, 0, {0}
 
 static struct _cfg delay_cfg[] = {
 	{ const_delay_parse, const_delay_run,
-		"constant,delay", _CFG_END },
+		"constant,delay", TLEM_CFG_END },
 	{ uniform_delay_parse, uniform_delay_run,
-		"uniform,dmin,dmax # dmin <= dmax", _CFG_END },
+		"uniform,dmin,dmax # dmin <= dmax", TLEM_CFG_END },
 	{ exp_delay_parse, exp_delay_run,
-		"exp,dmin,davg # dmin <= davg", _CFG_END },
-	{ NULL, NULL, NULL, _CFG_END }
+		"exp,dmin,davg # dmin <= davg", TLEM_CFG_END },
+	{ NULL, NULL, NULL, TLEM_CFG_END }
 };
 
 /* standard bandwidth, also accepts just a number */
@@ -1692,10 +1696,10 @@ ether_bw_run(struct _qs *q, struct _cfg *arg)
 
 static struct _cfg bw_cfg[] = {
 	{ const_bw_parse, const_bw_run,
-		"constant,bps", _CFG_END },
+		"constant,bps", TLEM_CFG_END },
 	{ ether_bw_parse, ether_bw_run,
-		"ether,bps", _CFG_END },
-	{ NULL, NULL, NULL, _CFG_END }
+		"ether,bps", TLEM_CFG_END },
+	{ NULL, NULL, NULL, TLEM_CFG_END }
 };
 
 /*
@@ -1801,8 +1805,8 @@ const_ber_run(struct _qs *q, struct _cfg *arg)
 
 static struct _cfg loss_cfg[] = {
 	{ const_plr_parse, const_plr_run,
-		"plr,prob # 0 <= prob <= 1", _CFG_END },
+		"plr,prob # 0 <= prob <= 1", TLEM_CFG_END },
 	{ const_ber_parse, const_ber_run,
-		"ber,prob # 0 <= prob <= 1", _CFG_END },
-	{ NULL, NULL, NULL, _CFG_END }
+		"ber,prob # 0 <= prob <= 1", TLEM_CFG_END },
+	{ NULL, NULL, NULL, TLEM_CFG_END }
 };

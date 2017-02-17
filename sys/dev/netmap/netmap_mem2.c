@@ -142,7 +142,8 @@ struct netmap_mem_ops {
 	ssize_t  (*nmd_if_offset)(struct netmap_mem_d *, const void *vaddr);
 	void (*nmd_delete)(struct netmap_mem_d *);
 
-	struct netmap_if * (*nmd_if_new)(struct netmap_adapter *);
+	struct netmap_if * (*nmd_if_new)(struct netmap_adapter *,
+					 struct netmap_priv_d *);
 	void (*nmd_if_delete)(struct netmap_adapter *, struct netmap_if *);
 	int  (*nmd_rings_create)(struct netmap_adapter *);
 	void (*nmd_rings_delete)(struct netmap_adapter *);
@@ -221,7 +222,7 @@ NMD_DEFCB(int, config);
 NMD_DEFCB1(ssize_t, if_offset, const void *);
 NMD_DEFCB(void, delete);
 
-NMD_DEFNACB(struct netmap_if *, if_new);
+NMD_DEFNACB1(struct netmap_if *, if_new, struct netmap_priv_d *);
 NMD_DEFNACB1(void, if_delete, struct netmap_if *);
 NMD_DEFNACB(int, rings_create);
 NMD_DEFNACB(void, rings_delete);
@@ -364,21 +365,6 @@ netmap_mem2_get_lut(struct netmap_mem_d *nmd, struct netmap_lut *lut)
 	return 0;
 }
 
-static struct netmap_obj_params netmap_params[NETMAP_POOLS_NR] = {
-	[NETMAP_IF_POOL] = {
-		.size = 1024,
-		.num  = 100,
-	},
-	[NETMAP_RING_POOL] = {
-		.size = 9*PAGE_SIZE,
-		.num  = 200,
-	},
-	[NETMAP_BUF_POOL] = {
-		.size = 2048,
-		.num  = NETMAP_BUF_MAX_NUM,
-	},
-};
-
 static struct netmap_obj_params netmap_min_priv_params[NETMAP_POOLS_NR] = {
 	[NETMAP_IF_POOL] = {
 		.size = 1024,
@@ -496,11 +482,11 @@ static const struct netmap_mem_d nm_blueprint = {
 #define DECLARE_SYSCTLS(id, name) \
 	SYSBEGIN(mem2_ ## name); \
 	SYSCTL_INT(_dev_netmap, OID_AUTO, name##_size, \
-	    CTLFLAG_RW, &netmap_params[id].size, 0, "Requested size of netmap " STRINGIFY(name) "s"); \
+	    CTLFLAG_RW, &nm_mem.params[id].size, 0, "Requested size of netmap " STRINGIFY(name) "s"); \
 	SYSCTL_INT(_dev_netmap, OID_AUTO, name##_curr_size, \
 	    CTLFLAG_RD, &nm_mem.pools[id]._objsize, 0, "Current size of netmap " STRINGIFY(name) "s"); \
 	SYSCTL_INT(_dev_netmap, OID_AUTO, name##_num, \
-	    CTLFLAG_RW, &netmap_params[id].num, 0, "Requested number of netmap " STRINGIFY(name) "s"); \
+	    CTLFLAG_RW, &nm_mem.params[id].num, 0, "Requested number of netmap " STRINGIFY(name) "s"); \
 	SYSCTL_INT(_dev_netmap, OID_AUTO, name##_curr_num, \
 	    CTLFLAG_RD, &nm_mem.pools[id].objtotal, 0, "Current number of netmap " STRINGIFY(name) "s"); \
 	SYSCTL_INT(_dev_netmap, OID_AUTO, priv_##name##_size, \
@@ -1771,7 +1757,7 @@ netmap_mem2_rings_delete(struct netmap_adapter *na)
  * the interface is in netmap mode.
  */
 static struct netmap_if *
-netmap_mem2_if_new(struct netmap_adapter *na)
+netmap_mem2_if_new(struct netmap_adapter *na, struct netmap_priv_d *priv)
 {
 	struct netmap_if *nifp;
 	ssize_t base; /* handy for relative offsets between rings and nifp */
@@ -1810,24 +1796,28 @@ netmap_mem2_if_new(struct netmap_adapter *na)
 	 */
 	base = netmap_if_offset(na->nm_mem, nifp);
 	for (i = 0; i < n[NR_TX]; i++) {
-		if (na->tx_rings[i].ring == NULL) {
-			// XXX maybe use the offset of an error ring,
-			// like we do for buffers?
-			*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i] = 0;
-			continue;
+		/* XXX instead of ofs == 0 maybe use the offset of an error
+		 * ring, like we do for buffers? */
+		ssize_t ofs = 0;
+
+		if (na->tx_rings[i].ring != NULL && i >= priv->np_qfirst[NR_TX]
+				&& i < priv->np_qlast[NR_TX]) {
+			ofs = netmap_ring_offset(na->nm_mem,
+						 na->tx_rings[i].ring) - base;
 		}
-		*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i] =
-			netmap_ring_offset(na->nm_mem, na->tx_rings[i].ring) - base;
+		*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i] = ofs;
 	}
 	for (i = 0; i < n[NR_RX]; i++) {
-		if (na->rx_rings[i].ring == NULL) {
-			// XXX maybe use the offset of an error ring,
-			// like we do for buffers?
-			*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i+n[NR_TX]] = 0;
-			continue;
+		/* XXX instead of ofs == 0 maybe use the offset of an error
+		 * ring, like we do for buffers? */
+		ssize_t ofs = 0;
+
+		if (na->rx_rings[i].ring != NULL && i >= priv->np_qfirst[NR_RX]
+				&& i < priv->np_qlast[NR_RX]) {
+			ofs = netmap_ring_offset(na->nm_mem,
+						 na->rx_rings[i].ring) - base;
 		}
-		*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i+n[NR_TX]] =
-			netmap_ring_offset(na->nm_mem, na->rx_rings[i].ring) - base;
+		*(ssize_t *)(uintptr_t)&nifp->ring_ofs[i+n[NR_TX]] = ofs;
 	}
 
 	NMA_UNLOCK(na->nm_mem);
@@ -2186,7 +2176,7 @@ netmap_mem_pt_guest_delete(struct netmap_mem_d *nmd)
 }
 
 static struct netmap_if *
-netmap_mem_pt_guest_if_new(struct netmap_adapter *na)
+netmap_mem_pt_guest_if_new(struct netmap_adapter *na, struct netmap_priv_d *priv)
 {
 	struct netmap_mem_ptg *ptnmd = (struct netmap_mem_ptg *)na->nm_mem;
 	struct mem_pt_if *ptif;

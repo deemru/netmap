@@ -172,7 +172,7 @@ netmap_pipe_remove(struct netmap_adapter *parent, struct netmap_pipe_adapter *na
 	parent->na_pipes[n] = NULL;
 }
 
-static int
+int
 netmap_pipe_txsync(struct netmap_kring *txkring, int flags)
 {
         struct netmap_kring *rxkring = txkring->pipe;
@@ -237,7 +237,7 @@ netmap_pipe_txsync(struct netmap_kring *txkring, int flags)
 	return 0;
 }
 
-static int
+int
 netmap_pipe_rxsync(struct netmap_kring *rxkring, int flags)
 {
         struct netmap_kring *txkring = rxkring->pipe;
@@ -286,7 +286,7 @@ netmap_pipe_rxsync(struct netmap_kring *rxkring, int flags)
  */
 
 
-/* netmap_pipe_krings_delete.
+/* netmap_pipe_krings_create.
  *
  * There are two cases:
  *
@@ -317,7 +317,7 @@ netmap_pipe_krings_create(struct netmap_adapter *na)
 		int i;
 
 		/* case 1) above */
-		D("%p: case 1, create both ends", na);
+		ND("%p: case 1, create both ends", na);
 		error = netmap_krings_create(na, 0);
 		if (error)
 			goto err;
@@ -331,8 +331,8 @@ netmap_pipe_krings_create(struct netmap_adapter *na)
 		for_rx_tx(t) {
 			enum txrx r = nm_txrx_swap(t); /* swap NR_TX <-> NR_RX */
 			for (i = 0; i < nma_get_nrings(na, t); i++) {
-				NMR(na, t)[i].pipe = NMR(&pna->peer->up, r) + i;
-				NMR(&pna->peer->up, r)[i].pipe = NMR(na, t) + i;
+				NMR(na, t)[i].pipe = NMR(ona, r) + i;
+				NMR(ona, r)[i].pipe = NMR(na, t) + i;
 			}
 		}
 
@@ -390,11 +390,11 @@ netmap_pipe_reg(struct netmap_adapter *na, int onoff)
 	ND("%p: onoff %d", na, onoff);
 	if (onoff) {
 		for_rx_tx(t) {
-			for (i = 0; i < nma_get_nrings(na, t) + 1; i++) {
+			for (i = 0; i < nma_get_nrings(na, t); i++) {
 				struct netmap_kring *kring = &NMR(na, t)[i];
 
 				if (nm_kring_pending_on(kring)) {
-					/* mark the partner ring as needed */
+					/* mark the peer ring as needed */
 					kring->pipe->nr_kflags |= NKR_NEEDRING;
 				}
 			}
@@ -429,7 +429,9 @@ netmap_pipe_reg(struct netmap_adapter *na, int onoff)
 					/* mark the peer ring as no longer needed by us
 					 * (it may still be kept if sombody else is using it)
 					 */
-					kring->pipe->nr_kflags &= ~NKR_NEEDRING;
+					if (kring->pipe) {
+						kring->pipe->nr_kflags &= ~NKR_NEEDRING;
+					}
 				}
 			}
 		}
@@ -438,7 +440,7 @@ netmap_pipe_reg(struct netmap_adapter *na, int onoff)
 	}
 
 	if (na->active_fds) {
-		D("active_fds %d", na->active_fds);
+		ND("active_fds %d", na->active_fds);
 		return 0;
 	}
 
@@ -491,7 +493,7 @@ netmap_pipe_krings_delete(struct netmap_adapter *na)
 		return;
 	}
 	/* case 1) above */
-	ND("%p: case 1, deleting everyhing", na);
+	ND("%p: case 1, deleting everything", na);
 	netmap_krings_delete(na); /* also zeroes tx_rings etc. */
 	ona = &pna->peer->up;
 	if (ona->tx_rings == NULL) {
@@ -508,7 +510,7 @@ netmap_pipe_dtor(struct netmap_adapter *na)
 {
 	struct netmap_pipe_adapter *pna =
 		(struct netmap_pipe_adapter *)na;
-	ND("%p", na);
+	ND("%p %p", na, pna->parent_ifp);
 	if (pna->peer_ref) {
 		ND("%p: clean up peer", na);
 		pna->peer_ref = 0;
@@ -516,12 +518,15 @@ netmap_pipe_dtor(struct netmap_adapter *na)
 	}
 	if (pna->role == NR_REG_PIPE_MASTER)
 		netmap_pipe_remove(pna->parent, pna);
+	if (pna->parent_ifp)
+		if_rele(pna->parent_ifp);
 	netmap_adapter_put(pna->parent);
 	pna->parent = NULL;
 }
 
 int
-netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
+netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na,
+		struct netmap_mem_d *nmd, int create)
 {
 	struct nmreq pnmr;
 	struct netmap_adapter *pna; /* parent adapter */
@@ -529,7 +534,7 @@ netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
 	struct ifnet *ifp = NULL;
 	u_int pipe_id;
 	int role = nmr->nr_flags & NR_REG_MASK;
-	int error;
+	int error, retries = 0;
 
 	ND("flags %x", nmr->nr_flags);
 
@@ -544,12 +549,28 @@ netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
 	memcpy(&pnmr.nr_name, nmr->nr_name, IFNAMSIZ);
 	/* pass to parent the requested number of pipes */
 	pnmr.nr_arg1 = nmr->nr_arg1;
-	error = netmap_get_na(&pnmr, &pna, &ifp, create);
-	if (error) {
-		ND("parent lookup failed: %d", error);
-		return error;
+	for (;;) {
+		int create_error;
+
+		error = netmap_get_na(&pnmr, &pna, &ifp, nmd, create);
+		if (!error)
+			break;
+		if (error != ENXIO || retries++) {
+			ND("parent lookup failed: %d", error);
+			return error;
+		}
+		ND("try to create a persistent vale port");
+		/* create a persistent vale port and try again */
+		NMG_UNLOCK();
+		create_error = netmap_vi_create(&pnmr, 1 /* autodelete */);
+		NMG_LOCK();
+		if (create_error && create_error != EEXIST) {
+			if (create_error != EOPNOTSUPP) {
+				D("failed to create a persistent vale port: %d", create_error);
+			}
+			return error;
+		}
 	}
-	ND("found parent: %s", na->name);
 
 	if (NETMAP_OWNED_BY_KERN(pna)) {
 		ND("parent busy");
@@ -572,7 +593,7 @@ netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
 		/* the pipe we have found already holds a ref to the parent,
                  * so we need to drop the one we got from netmap_get_na()
                  */
-		netmap_adapter_put(pna);
+		netmap_unget_na(pna, ifp);
 		goto found;
 	}
 	ND("pipe %d not found, create %d", pipe_id, create);
@@ -594,6 +615,7 @@ netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
 	mna->id = pipe_id;
 	mna->role = NR_REG_PIPE_MASTER;
 	mna->parent = pna;
+	mna->parent_ifp = ifp;
 
 	mna->up.nm_txsync = netmap_pipe_txsync;
 	mna->up.nm_rxsync = netmap_pipe_rxsync;
@@ -644,6 +666,9 @@ netmap_get_pipe_na(struct nmreq *nmr, struct netmap_adapter **na, int create)
          * need another one for the other endpoint we created
          */
 	netmap_adapter_get(pna);
+	/* likewise for the ifp, if any */
+	if (ifp)
+		if_ref(ifp);
 
 	if (role == NR_REG_PIPE_MASTER) {
 		req = mna;
@@ -665,11 +690,6 @@ found:
 	/* keep the reference to the parent.
          * It will be released by the req destructor
          */
-
-	/* drop the ifp reference, if any */
-	if (ifp) {
-		if_rele(ifp);
-	}
 
 	return 0;
 

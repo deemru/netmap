@@ -98,7 +98,7 @@ nm_os_malloc(size_t size)
 void *
 nm_os_realloc(void *addr, size_t new_size, size_t old_size __unused)
 {
-	return realloc(addr, new_size, M_DEVBUF, M_NOWAIT | M_ZERO);	
+	return realloc(addr, new_size, M_DEVBUF, M_NOWAIT | M_ZERO);
 }
 
 void
@@ -110,13 +110,13 @@ nm_os_free(void *addr)
 void
 nm_os_ifnet_lock(void)
 {
-	IFNET_WLOCK();
+	IFNET_RLOCK();
 }
 
 void
 nm_os_ifnet_unlock(void)
 {
-	IFNET_WUNLOCK();
+	IFNET_RUNLOCK();
 }
 
 static int netmap_use_count = 0;
@@ -253,7 +253,6 @@ nm_os_csum_tcpudp_ipv6(struct nm_ipv6hdr *ip6h, void *data,
 void *
 nm_os_send_up(struct ifnet *ifp, struct mbuf *m, struct mbuf *prev)
 {
-
 	NA(ifp)->if_input(ifp, m);
 	return NULL;
 }
@@ -404,7 +403,6 @@ netmap_getna(if_t ifp)
 int
 nm_os_generic_find_num_desc(struct ifnet *ifp, unsigned int *tx, unsigned int *rx)
 {
-	D("called, in tx %d rx %d", *tx, *rx);
 	return 0;
 }
 
@@ -412,9 +410,10 @@ nm_os_generic_find_num_desc(struct ifnet *ifp, unsigned int *tx, unsigned int *r
 void
 nm_os_generic_find_num_queues(struct ifnet *ifp, u_int *txq, u_int *rxq)
 {
-	D("called, in txq %d rxq %d", *txq, *rxq);
-	*txq = netmap_generic_rings;
-	*rxq = netmap_generic_rings;
+	unsigned num_rings = netmap_generic_rings ? netmap_generic_rings : 1;
+
+	*txq = num_rings;
+	*rxq = num_rings;
 }
 
 void
@@ -1042,7 +1041,7 @@ nm_os_kthread_wakeup_worker(struct nm_kthread *nmk)
 	mtx_lock(&nmk->worker_lock);
 	nmk->scheduled++;
 	if (nmk->worker_ctx.cfg.wchan) {
-		wakeup((void *)nmk->worker_ctx.cfg.wchan);
+		wakeup((void *)(uintptr_t)nmk->worker_ctx.cfg.wchan);
 	}
 	mtx_unlock(&nmk->worker_lock);
 }
@@ -1108,8 +1107,8 @@ nm_kthread_worker(void *data)
 				continue;
 			} else if (nmk->run) {
 				/* wait on event with one second timeout */
-				msleep_spin((void *)ctx->cfg.wchan, &nmk->worker_lock,
-					    "nmk_ev", hz);
+				msleep((void *)(uintptr_t)ctx->cfg.wchan, &nmk->worker_lock,
+					0, "nmk_ev", hz);
 				nmk->scheduled++;
 			}
 			mtx_unlock(&nmk->worker_lock);
@@ -1140,7 +1139,7 @@ nm_os_kthread_create(struct nm_kthread_cfg *cfg, unsigned int cfgtype,
 	if (!nmk)
 		return NULL;
 
-	mtx_init(&nmk->worker_lock, "nm_kthread lock", NULL, MTX_SPIN);
+	mtx_init(&nmk->worker_lock, "nm_kthread lock", NULL, MTX_DEF);
 	nmk->worker_ctx.worker_fn = cfg->worker_fn;
 	nmk->worker_ctx.worker_private = cfg->worker_private;
 	nmk->worker_ctx.type = cfg->type;
