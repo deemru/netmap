@@ -627,7 +627,6 @@ static int
 source_hwaddr(const char *ifname, char *buf)
 {
 	struct ifaddrs *ifaphead, *ifap;
-	int l = sizeof(ifap->ifa_name);
 
 	if (getifaddrs(&ifaphead) != 0) {
 		D("getifaddrs %s failed", ifname);
@@ -641,7 +640,7 @@ source_hwaddr(const char *ifname, char *buf)
 
 		if (!sdl || sdl->sdl_family != AF_LINK)
 			continue;
-		if (strncmp(ifap->ifa_name, ifname, l) != 0)
+		if (strncmp(ifap->ifa_name, ifname, IFNAMSIZ) != 0)
 			continue;
 		mac = (uint8_t *)LLADDR(sdl);
 		sprintf(buf, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -2891,6 +2890,7 @@ out:
 	}
 	start_threads(&g);
 	/* Install the handler and re-enable SIGINT for the main thread */
+	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = sigint_h;
 	if (sigaction(SIGINT, &sa, NULL) < 0) {
 		D("failed to install ^C handler: %s", strerror(errno));
